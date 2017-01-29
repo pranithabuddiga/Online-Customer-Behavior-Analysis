@@ -1,0 +1,313 @@
+################################# TrackeRs Team Project Code ##########################################
+########################## Online Customer Behavious Analysis-Clickstream #############################
+#######################################################################################################
+
+####Required packages
+library(lubridate)
+library(dplyr)
+library(sqldf)
+library(clickstream)
+library(data.table)
+
+#Reading files
+clicks <- fread("clicks.dat",sep=",")
+buys<-fread("buys.dat",header = TRUE,sep=',')
+
+colnames(buys)<-c("session_ID","timestamp","item_id","price","quantity")
+colnames(clicks)<-c("session_ID","timestamp","item_id","category")
+
+# For Modelling we subseted the file and created a balanced dataset 
+#as to run models on such high data is very time taking
+
+x<-sqldf("select * from clicks where session_ID IN (select distinct session_ID from buys) limit 100000")
+x$buyer<-1
+
+y<-sqldf("select * from clicks where session_ID NOT IN (select distinct session_ID from buys) limit 300000")
+y$buyer<-0
+
+balanced<-rbind(x,y)
+
+#####Metrics table creation#############
+
+head(clicks)
+
+# To retrive parameters from the given dat ato utilize for futher analysis
+# New columns are created like no.of clicks,day,month,hour the click made,duration grouped by session id.
+x<-clicks%>% mutate(timestamp = ymd_hms(timestamp)) %>%
+  group_by(session_ID)%>%
+  summarise(No_of_clicks = n(),
+            No_of_items_clicked = n_distinct(item_id),
+            date= day(max(timestamp)),
+            day = wday(max(timestamp)),
+            duration = (max(timestamp)-min(timestamp)),
+            HourOfDay = hour(max(timestamp)),
+            month = month(max(timestamp))
+  ) %>%
+  
+  mutate(No_of_items_clicked,No_of_clicks,date,day,duration,HourOfDay,month) 
+
+#To put a column which indicates buyer or not
+train$buyer <- ifelse(Total_Users$session_ID %in% buy_sessions$session_ID,1,0)
+
+############################# Modelling ################################
+# Data Manupulation 
+balanced$HourOfDay <- as.factor(balanced$HourOfDay)
+levels(balanced$day) <-c('1','2','3','4','5','6','7')
+balanced$buyer= as.factor(balanced$buyer)
+balanced$date= as.factor(balanced$date)
+balanced$duration = as.double(balanced$duration)
+
+####Model1
+M2<-train(buyer~ No_of_clicks+No_of_items_clicked+day+duration+HourOfDay, data = balanced, method = 'LogitBoost',nIter=10)
+summary(M2)
+M2.predictions = caret::predict.train(M2,newdata = balanced)
+confusionMatrix(balanced$buyer,M2.predictions)
+
+'''
+Reference
+Prediction     0     1
+0 78960  1127
+1 13330  1008
+Accuracy : 0.8469
+'''
+#####################Model2 
+library(randomForest)
+rf1 <- randomForest(buyer~ No_of_clicks+No_of_items_clicked+day+duration+HourOfDay+month ,data=balanced, ntree=5)
+z = predict(rf1,data=balanced)
+confusionMatrix(balanced$buyer,z)
+'''
+
+Reference
+Prediction     0     1
+0 68382  3704
+1  9887  2941
+Accuracy : 0.8399 
+'''
+#################
+model <- glm(buyer ~ No_of_clicks+No_of_items_clicked+duration+day+ HourOfDay,
+             family=binomial(link='logit'),data=balanced)
+
+predict_prob<-predict(model,newdata=balanced,type="response")
+
+predict_buyer<-ifelse(predict_prob>0.3,1,0)
+predict <- predict_buyer
+confusionMatrix(balanced$buyer,predict)
+'''
+Reference
+Prediction     0     1
+0 75976  4111
+1  9890  4448
+
+Accuracy : 0.8517  
+'''
+# Choosing glm model as the best fit model
+
+##################################### Markov Analysis ######################
+
+
+#subsetting sessionids and itemids for analysis
+click1 <- clicks[,c("session_ID","item_id")]
+
+View(click1)
+
+View(df1)
+
+#grouping all the items under a single session
+df1<-click1 %>%
+  group_by(session_ID) %>%
+  summarise(item_id = paste(item_id, collapse = ","))
+
+#adding column to find whether customer purchased or not
+df1$buyer<- ifelse(df1$session_ID %in% b1$session_ID,"Yes","No")
+
+
+#subsetting for checking Clickstream package as it takes more than 1hr to do run the code
+df2<- df1[1:100,]
+
+View(df2)
+sqldf("select count(1) from df2 where buyer = 'Yes'")
+
+v=as.character(df2$item_id)
+l=c()
+mainl = list()
+
+
+#Converting data as per the sutitable for data modeling
+for (i in 1:length(df2$item_id))
+{
+  l=c()
+  vec=unlist(strsplit(v[i], "[,]"))
+  for (j in 1:length(vec))
+  {
+    l = c(l,vec[j])
+  }
+  l = c(l,df2$buyer[i])
+  mainl[[i]] <- l
+}
+
+mainl[[1]][1]
+
+#changing the class of data into Clickstreams as it will calculate the frequencies of all the items in the list
+class(mainl) <- "Clickstreams"
+summary(mainl)
+#runing fit Markovchain model and we assumed that each click is dependent only on the previous click and used linear optimizer as
+#it is fast compared to quadratic optimizer
+mc <- fitMarkovChain(clickstreamList = mainl, order = 1,
+                     control = list(optimizer = "linear"))
+mc
+summary(mc)
+
+#plot to view chain
+plot(mc, order = 1)
+
+
+
+#Creating dataframe for prediction
+df3<- df1[101:200,]
+
+v=as.character(df3$item_id)
+l=c()
+testl = list()
+
+#Converting data into suitable format for doing analysis
+
+for (i in 1:length(df3$item_id))
+{
+  l=c()
+  vec=unlist(strsplit(v[i], "[,]"))
+  for (j in 1:length(vec))
+  {
+    l = c(l,vec[j])
+  }
+  l = c(l,df3$buyer[i])
+  testl[[i]] <- l
+}
+
+testl[[1]]
+
+
+#run the predict function on the unseen data and review results.
+#dist can be changed as per our needs. It gives how many clicks into future we want to predict
+for (t in testl)
+{
+  print(predict(mc, startPattern = new("Pattern", sequence = as.vector(t)),dist=2))
+}
+
+#Created simulated sample as the original dataset has very large amount of items which is very difficult 
+#to vizualize the data for presentation purpose
+
+m <- randomClickstreams(
+  states = c("I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I9", "I10", "No", "Yes"),
+  startProbabilities = c(0.05, 0.2, 0.1, 0.15, 0.05, 0.1, 0.1, 0.1, 0.05,0.1, 0, 0),
+  transitionMatrix = matrix(
+    c(  0.1, 0, 0.29, 0.06, 0.11, 0.13, 0.21, 0.1, 0,
+        0.01, 0.09, 0.05, 0.21, 0.12, 0.17, 0.11, 0.2, 0.04,
+        0.07, 0.16, 0.03, 0.25, 0.23, 0.08, 0.03, 0.12, 0.03,
+        0.16, 0.14, 0.07, 0, 0.05, 0.22, 0.19, 0.1, 0.07,
+        0.24, 0.27, 0.17, 0.13, 0, 0.03, 0.09, 0.06, 0.01,
+        0.11, 0.18, 0.04, 0.15, 0.26, 0, 0.1, 0.11, 0.05,
+        0.21, 0.07, 0.08, 0.2, 0.14, 0.18, 0.02, 0.08, 0.02,
+        0.11, 0.18, 0.04, 0.15, 0.26, 0, 0.1, 0.11, 0.05,
+        0.24, 0.27, 0.17, 0.13, 0, 0.03, 0.09, 0.06, 0.01,
+        0.07, 0.16, 0.03, 0.25, 0.23, 0.08, 0.03, 0.12, 0.03,
+        0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0), nrow = 12),
+  meanLength = 100, n = 100000)
+
+m <- list(Session1 = c("I1", "I2", "I1", "I3", "I4", "No"),
+          Session2 = c("I3", "I4", "I1", "I3", "No"),
+          Session3 = c("I5", "I1", "I6", "I7", "I6", "I7", "I8", "I7", "Yes"),
+          Session4 = c("I9", "I2", "I11", "I12", "I11", "I13", "I11", "Yes"),
+          Session5 = c("I4", "I6", "I11", "I6", "I1", "I3", "No"),
+          Session6 = c("I3", "I13", "I12", "I4", "I12", "I1", "I4", "I1", "I3", "No"),
+          Session7 = c("I10", "I5", "I10", "I8", "I8", "I5", "I1", "I7", "Yes"),
+          Session8 = c("I9", "I2", "I1", "I9", "I3", "I1", "No"),
+          Session9 = c("I5", "I8", "I5", "I7", "I4", "I1", "I6", "I4", "No"),
+          Session10 = c("I1", "I3", "I5", "I7", "I4", "I1", "Yes"),
+          Session11 = c("I13", "I9",  "I4", "I1", "I2", "I3", "No"),
+          Session12 = c("I3", "I6", "I5", "I7", "I2", "I1", "I6", "I11", "Yes"))
+class(m) <- "Clickstreams"
+
+summary(m)
+mc <- fitMarkovChain(clickstreamList = cls, order = 2,
+                     control = list(optimizer = "quadratic"))
+plot(mc)
+
+
+#########Relation ships from data ##################################
+
+# TO convert data into required format for doing analysis
+train$day= as.factor(train$day)
+levels(train$day)=c("Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday")
+z= as.double(train$duration)
+View(train)
+train$DurationBin=cut(z,breaks=c(0,10,20,30,40,50,60),
+                      labels=c("0-10min","10-20 min","20-30min","30-40min","40-50min","50-60min")
+                      ,include.lowest=T)
+View(train)
+
+### Buys Vs time#####
+
+x<-tapply(train$buyer,train$day,FUN=function(x) length(x))
+
+barplot(x,main="Buys Vs DayOfWeek",xlab="day",ylab="Buys",col="orange")
+
+#Friday most conversion rate
+# sunday the conversion rate is higher
+
+x<-tapply(train$buyer,train$HourOfDay,FUN=function(x) length(x))
+barplot(x,main="Buys Vs HourOfDay",xlab="HourOfDay",ylab="Buys",col="lightskyblue ",ylim = c(0,130000))
+
+# 19th hour more conversion rate
+
+#####Does no of clicks imply conversion rate
+str(train)
+x<-tapply(train$No_of_clicks,train$day,FUN=function(x) sum(x))
+barplot(x,main="NumOfClicks Vs DayOfWeek",xlab="Number OfClicks",ylab="No.of Clicks",col="orange")
+
+#observed that sunday has most number of clicks and even the conversion rate is higher
+#friday has least number of clicks but still managed to have the most conversion rate 
+#####
+x<-tapply(train$No_of_clicks,train$HourOfDay,FUN=function(x) sum(x))
+barplot(x,main="NumOfClicks Vs HourOfDay",xlab="HourOfDay",ylab="Number of Clicks",col="lightskyblue")
+
+####Does duration imply conversion rate
+
+x<-tapply(train$buyer,train$DurationBin,FUN=function(x) length(x))
+
+barplot(x,main="Buys Vs Duration",xlab="Duration",ylab="Buys",col="mediumvioletred",ylim = c(0,1200000))
+
+######Feature extraction - to get most bought item
+
+########Analyzing Item wise buys and clicks
+
+Item_Buy_Freq<-sqldf("select item_id, count(1) as buys from buys group by item_id order by buys desc,item_id")
+#643078800- most bough item
+#15203
+Item_Click_Freq<-sqldf("select item_id, count(1) as clicks 
+                       from clicks group by item_id order by clicks desc,item_id")
+
+Item_Buy_Clicks =sqldf("select a.item_id,a.buys,b.clicks 
+                       from Item_Buy_Freq as a join Item_Click_Freq as b on a.item_id = b.item_id order by a.buys,b.clicks")
+
+plot(Item_Buy_Clicks$buys,Item_Buy_Clicks$clicks,col= "red",xlab= "Buys for Item",ylab="Clicks fro Item",main="Buys and clicks for Item")
+
+# We observe that buys and clicks for item are highly related ,but still there are some cases whare buys and clicks are inversely related
+
+# Observering trend of most_clicked items with  their buys
+
+Most_clicked_items = sqldf("select * from Item_Click_Freq limit 50")
+top_clicked_observation= sqldf("select b.item_id,a.buys,b.clicks from Item_Buy_Freq as a join Most_clicked_items as b on a.item_id = b.item_id")
+View(top_clicked_observation)
+plot(x=top_clicked_observation$clicks,y=top_clicked_observation$buys,col= "red",ylab= "Buys for Item",xlab="Clicks fro Item")
+
+
+# So we are doing further analysis to classify clicks of an item which are not bought by any customer
+
+Item_NoBuy_Click<-sqldf("select item_id, count(1) as clicks 
+                        from clicks  
+                        where item_id not in(select distinct item_id from buys) group by item_id order by clicks desc,item_id")
+plot(Item_NoBuy_Click,main = "Clicks for Items not Bought")
+abline(h = mean(Item_Buy_Clicks$clicks),col="red")
+#subsetting items which are not bought but having clicks greater than avearge no.of clicks in bought items
+subset(Item_NoBuy_Click,clicks>370)
